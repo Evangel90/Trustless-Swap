@@ -20,7 +20,7 @@ public struct LockCreated has copy, drop{
 
 public struct Key has key, store { id: UID }
 
-// const ELockKeyMismatch: u64 = 0;
+const ELockKeyMismatch: u64 = 0;
 
 public fun lock<T: key + store>(obj: T, ctx: &mut TxContext): (Locked<T>, Key){
     let key = Key {
@@ -42,4 +42,24 @@ public fun lock<T: key + store>(obj: T, ctx: &mut TxContext): (Locked<T>, Key){
     dof::add(&mut lock.id, LockedObjectKey {}, obj);
 
     (lock, key)
+}
+
+public struct LockedDestroyed has copy, drop{
+    locked_id: ID,
+}
+
+public fun unlock<T: key + store>(mut locked: Locked<T>, key: Key) : T {
+    assert!(locked.key == object::id(&key), ELockKeyMismatch);
+    let Key{ id } = key;
+    id.delete();
+
+    let obj = dof::remove<LockedObjectKey, T>(&mut locked.id, LockedObjectKey {});
+
+    event::emit(LockedDestroyed{
+        locked_id: object::id(&locked)
+    });
+
+    let Locked { id, key: _} = locked;
+    id.delete();
+    obj
 }
