@@ -21,6 +21,10 @@ public struct EscrowCreated has copy, drop{
     item_id: ID,
 }
 
+public struct EscrowSwapped has copy, drop{
+    escrow_id: ID,
+}
+
 const EMismatchedSenderRecipient: u64 = 0;
 
 const EMismatcedExchangeObject: u64 = 1;
@@ -33,10 +37,10 @@ public fun create<T: key + store>(
 ){
     let mut escrow = Escrow<T>{
         id: object::new(ctx),
-        sender: ctx.sender,
+        sender: ctx.sender(),
         recipient,
         exchange_key,
-    }
+    };
 
     event::emit(EscrowCreated{
         escrow_id: object::id(&escrow),
@@ -44,9 +48,38 @@ public fun create<T: key + store>(
         sender: escrow.sender,
         recipient,
         item_id: object::id(&escrowed),
-    })
+    });
 
     dof::add(&mut escrow.id, EscrowedObjectKey {}, escrowed);
 
     transfer::public_share_object(escrow);
+}
+
+public fun swap<T: key + store, U: key + store>(
+    mut escrow: Escrow<T>,
+    key: Key,
+    locked: Locked<U>,
+    ctx: &mut TxContext,
+): T{
+    let escrowed = dof::remove<EscrowedObjectKey, T>(&mut escrow.id, EscrowedObjectKey {});
+
+    let Escrow {
+        id,
+        sender,
+        recipient,
+        exchange_key,
+    } = escrow;
+
+    assert!(recipient == ctx.sender(), EMismatchedSenderRecipient);
+    assert!(exchange_key == object::id(&key), EMismatchedExchangeObject);
+
+    transfer::public_transfer(locked.unlock(key), sender);
+
+    event::emit(EscrowSwapped {
+        escrow_id: id.to_inner(),
+    });
+
+    id.delete();
+
+    escrowed
 }
