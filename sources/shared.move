@@ -27,7 +27,7 @@ public struct EscrowSwapped has copy, drop{
 
 const EMismatchedSenderRecipient: u64 = 0;
 
-const EMismatcedExchangeObject: u64 = 1;
+const EMismatchedExchangeObject: u64 = 1;
 
 public fun create<T: key + store>(
     escrowed: T,
