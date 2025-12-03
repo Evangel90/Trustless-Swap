@@ -25,6 +25,10 @@ public struct EscrowSwapped has copy, drop{
     escrow_id: ID,
 }
 
+public struct EscrowCancelled has copy, drop{
+    escrow_id: ID,
+}
+
 const EMismatchedSenderRecipient: u64 = 0;
 
 const EMismatchedExchangeObject: u64 = 1;
@@ -83,3 +87,23 @@ public fun swap<T: key + store, U: key + store>(
 
     escrowed
 }
+
+public fun return_to_sender<T: key + store>(mut escrow: Escrow<T>, ctx: &TxContext): T{
+    event::emit(EscrowCancelled{
+        escrow_id: object::id(&escrow),
+    }); 
+
+    let escrowed = dof::remove<EscrowedObjectKey, T>(&mut escrow.id, EscrowedObjectKey{});
+
+    let Escrow {
+        id,
+        sender,
+        recipient:_,
+        exchange_key: _,
+    } = escrow;
+
+    assert!(sender == ctx.sender(), EMismatchedSenderRecipient);
+    id.delete();
+    escrowed
+}
+
