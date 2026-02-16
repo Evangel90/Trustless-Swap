@@ -1,9 +1,11 @@
+//this module implements the escrow mechanism for a trustless swap using the lock mechanism defined in lock.move.
 module trustless_swap::shared_escrow;
 
 use trustless_swap::lock::{Locked, Key};
 use sui::dynamic_object_field as dof;
 use sui::event;
 
+//name of dof that holds the escrowed object
 public struct EscrowedObjectKey has copy, drop, store {}
 
 public struct Escrow<phantom T: key + store> has key, store {
@@ -33,6 +35,7 @@ const EMismatchedSenderRecipient: u64 = 0;
 
 const EMismatchedExchangeObject: u64 = 1;
 
+//this function creates and shares an escrow for a given asset T and it's corresponding exchange key.
 public fun create<T: key + store>(
     escrowed: T,
     exchange_key: ID,
@@ -59,6 +62,7 @@ public fun create<T: key + store>(
     transfer::public_share_object(escrow);
 }
 
+//this function allows the recipient to swap the escrowed object for the locked object by providing the correct exchange key
 public fun swap<T: key + store, U: key + store>(
     mut escrow: Escrow<T>,
     key: Key,
@@ -73,7 +77,8 @@ public fun swap<T: key + store, U: key + store>(
         recipient,
         exchange_key,
     } = escrow;
-
+    
+    //makes sure caller is interacting with the right escrow and has the right key to swap
     assert!(recipient == ctx.sender(), EMismatchedSenderRecipient);
     assert!(exchange_key == object::id(&key), EMismatchedExchangeObject);
 
@@ -88,6 +93,7 @@ public fun swap<T: key + store, U: key + store>(
     escrowed
 }
 
+//this returns the escrowed object and deletes the escrow.
 public fun return_to_sender<T: key + store>(mut escrow: Escrow<T>, ctx: &TxContext): T{
     event::emit(EscrowCancelled{
         escrow_id: object::id(&escrow),

@@ -1,3 +1,4 @@
+//this module implements a lock mechanism for a trustless swap.
 module trustless_swap::lock;
 
 use sui::dynamic_object_field as dof;
@@ -18,10 +19,12 @@ public struct LockCreated has copy, drop{
     item_id: ID,
 }
 
+//exchange key used for the trustless swap and for unlocking locked asset.
 public struct Key has key, store { id: UID }
 
 const ELockKeyMismatch: u64 = 0;
 
+//this function creates a lock for a given asset T and returns the lock and the key.
 public fun lock<T: key + store>(obj: T, ctx: &mut TxContext): (Locked<T>, Key){
     let key = Key {
         id: object::new(ctx),
@@ -48,6 +51,7 @@ public struct LockedDestroyed has copy, drop{
     locked_id: ID,
 }
 
+//this function destroys the lock and returns the locked object to the caller. It requires the correct key to unlock.
 public fun unlock<T: key + store>(mut locked: Locked<T>, key: Key) : T {
     assert!(locked.key == object::id(&key), ELockKeyMismatch);
     let Key{ id } = key;

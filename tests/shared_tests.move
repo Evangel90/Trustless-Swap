@@ -38,7 +38,7 @@ fun test_successful_swap(){
     };
 
     {
-        ts.next_tx(BOB);
+        ts.next_tx(BOB);    
         let escrow: Escrow<Coin<SUI>> = ts.take_shared();
         let k2: Key = ts.take_from_sender();
         let l2: Locked<Coin<SUI>> = ts.take_from_sender();
