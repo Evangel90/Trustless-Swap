@@ -19,6 +19,11 @@ public struct LockCreated has copy, drop{
     item_id: ID,
 }
 
+//test event to check if indexer is working
+public struct LockIndexerWorking has copy, drop{
+    tx_sender: address,
+}
+
 //exchange key used for the trustless swap and for unlocking locked asset.
 public struct Key has key, store { id: UID }
 
@@ -66,4 +71,11 @@ public fun unlock<T: key + store>(mut locked: Locked<T>, key: Key) : T {
     let Locked { id, key: _} = locked;
     id.delete();
     obj
+}
+
+//test indexer
+public fun emit_test_event(ctx: &TxContext){
+    event::emit(LockIndexerWorking{
+        tx_sender: ctx.sender(),
+    }); 
 }
