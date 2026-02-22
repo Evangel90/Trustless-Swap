@@ -1,12 +1,10 @@
 # Building a Sui Event Indexer from Scratch with MongoDB & Mongoose
 
-**Updated for @mysten/sui v2.0 with SuiGrpcClient**
+**Updated for @mysten/sui v2.0 with SuiGraphQLClient**
 
-This guide walks you through building a complete event indexer for the Sui Trustless Swap contract — from an empty folder to a running service that polls the Sui network, processes on-chain events, and persists them to MongoDB.
+This guide walks you through building a complete event indexer for the Sui Trustless Swap contract — from an empty folder to a running service that polls the Sui network via GraphQL, processes on-chain events, and persists them to MongoDB.
 
-> **Note:** This guide uses the new `SuiGrpcClient` from `@mysten/sui v2.0+`, which is the recommended client for all Sui operations. The gRPC client offers improved performance over the deprecated JSON-RPC API.
-
-> **Type Note:** In v2.0, the `queryEvents` response returns an array of event objects with `type` and `parsedJson` fields. We define a minimal `SuiEvent` interface to match this structure. For filters, we use `SuiClientTypes.EventFilter` from `@mysten/sui/client`.
+> **Note:** This guide uses the `SuiGraphQLClient` from `@mysten/sui v2.0+`, which provides a clean, type-safe way to query events using GraphQL. GraphQL offers better querying capabilities and clearer response structures compared to the older JSON-RPC API.
 
 ---
 
@@ -14,7 +12,7 @@ This guide walks you through building a complete event indexer for the Sui Trust
 
 The Sui blockchain emits **events** when smart contract actions occur (e.g., an escrow is created, swapped, or cancelled). Your indexer's job is to:
 
-1. **Poll** the Sui gRPC endpoint for new events at a regular interval
+1. **Poll** the Sui GraphQL endpoint for new events at a regular interval
 2. **Process** each event and extract the relevant data
 3. **Persist** that data to MongoDB so your app can query it
 4. **Remember its cursor** — the last event it saw — so it can resume after a restart without re-processing everything
@@ -32,7 +30,7 @@ api/
 │   ├── locked.ts              # Mongoose Locked model
 │   └── cursor.ts              # Mongoose Cursor model (for resume)
 ├── config.ts                  # Contract addresses + config
-├── sui-utils.ts               # SuiGrpcClient factory
+├── sui-utils.ts               # SuiGraphQLClient factory
 └── indexer.ts                 # Entry point
 ```
 
@@ -87,7 +85,7 @@ MONGO_URI=mongodb://localhost:27017/sui-indexer
 
 ## Step 2 — Config & Sui Client
 
-These two small files wire up your contract address and the Sui network client using the new gRPC API.
+These two small files wire up your contract address and the Sui GraphQL client.
 
 **`api/config.ts`**
 
@@ -108,25 +106,24 @@ export const CONFIG = {
 
 **`api/sui-utils.ts`**
 
-This creates a `SuiGrpcClient` (the v2.0 recommended client) pointed at the right network. The gRPC client provides better performance and type safety compared to the deprecated JSON-RPC API.
+This creates a `SuiGraphQLClient` pointed at the right network. The GraphQL client provides a powerful query interface with type-safe responses.
 
 ```ts
-import { SuiGrpcClient } from '@mysten/sui/grpc';
+import { SuiGraphQLClient } from '@mysten/sui/graphql';
 
 type Network = 'mainnet' | 'testnet' | 'devnet' | 'localnet';
 
-// Network-to-URL mapping for gRPC endpoints
-const GRPC_URLS: Record<Network, string> = {
-  mainnet: 'https://fullnode.mainnet.sui.io:443',
-  testnet: 'https://fullnode.testnet.sui.io:443',
-  devnet: 'https://fullnode.devnet.sui.io:443',
-  localnet: 'http://127.0.0.1:9000',
+// Network-to-URL mapping for GraphQL endpoints
+const GRAPHQL_URLS: Record<Network, string> = {
+  mainnet: 'https://sui-mainnet.mystenlabs.com/graphql',
+  testnet: 'https://sui-testnet.mystenlabs.com/graphql',
+  devnet: 'https://sui-devnet.mystenlabs.com/graphql',
+  localnet: 'http://127.0.0.1:9125/graphql',
 };
 
-export const getClient = (network: Network): SuiGrpcClient => {
-  return new SuiGrpcClient({
-    network,
-    baseUrl: GRPC_URLS[network],
+export const getClient = (network: Network): SuiGraphQLClient => {
+  return new SuiGraphQLClient({
+    url: GRAPHQL_URLS[network],
   });
 };
 ```
@@ -147,16 +144,15 @@ Create an `api/models/` folder and add each file:
 
 **`api/models/cursor.ts`**
 
-The cursor is the most important model. Sui's `queryEvents` API returns a cursor that tells you where to continue from on the next poll. Without storing this, your indexer would re-process all historical events on every restart.
+The cursor is the most important model. Sui's GraphQL API returns an `endCursor` that tells you where to continue from on the next poll. Without storing this, your indexer would re-process all historical events on every restart.
 
 ```ts
 import { Schema, model } from 'mongoose';
 
 const CursorSchema = new Schema({
   // 'id' is the tracker type string, e.g. '0xABC::lock'
-  id:        { type: String, unique: true, required: true },
-  eventSeq:  { type: String, required: true },
-  txDigest:  { type: String, required: true },
+  id:     { type: String, unique: true, required: true },
+  cursor: { type: String, required: true }, // The endCursor from GraphQL
 });
 
 export const CursorModel = model('Cursor', CursorSchema);
@@ -219,7 +215,7 @@ export const LockedModel = model('Locked', LockedSchema);
 
 ## Step 4 — Event Handlers
 
-Handlers receive a batch of raw `SuiEvent` objects from the polling loop and write them to MongoDB. The key pattern is:
+Handlers receive a batch of events from the GraphQL response and write them to MongoDB. The key pattern is:
 
 1. Loop over the events and **build an in-memory `updates` map** keyed by object ID
 2. Apply whichever fields each event type provides to that map entry
@@ -232,15 +228,15 @@ This batching approach is important — a single poll may return multiple events
 **`api/indexer/escrow-handler.ts`**
 
 ```ts
-import type { SuiClientTypes } from '@mysten/sui/client';
 import { EscrowModel } from '../models/escrow';
 
-// The actual event structure from queryEvents includes these fields
-// We extend the base Event type to include the fields we need
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
-  // Other fields available: id, packageId, sender, bcs, timestampMs
+// GraphQL event structure
+type GraphQLEvent = {
+  contents: {
+    type: { repr: string };
+    json: unknown;
+  };
+  sender: { address: string };
 };
 
 // --- Type definitions matching the Move event structs ---
@@ -261,12 +257,12 @@ type EscrowCancelled = {
   escrow_id: string;
 };
 
-// Union type — we'll narrow it based on event.type below
+// Union type — we'll narrow it based on event type below
 type EscrowEvent = EscrowCreated | EscrowSwapped | EscrowCancelled;
 
 export const handleEscrowObjects = async (
-  events: SuiEvent[],
-  type: string,
+  events: GraphQLEvent[],
+  moduleType: string, // e.g., '0xABC::shared'
 ): Promise<void> => {
   // We accumulate all changes for a given escrow_id here
   // before writing, so multiple events for the same object
@@ -274,13 +270,15 @@ export const handleEscrowObjects = async (
   const updates: Record<string, Record<string, unknown>> = {};
 
   for (const event of events) {
+    const eventType = event.contents.type.repr;
+
     // Safety check: make sure this event actually came from the
-    // module we're tracking, not some other module that slipped in.
-    if (!event.type.startsWith(type)) {
-      throw new Error(`Invalid event module origin: ${event.type}`);
+    // module we're tracking
+    if (!eventType.startsWith(moduleType)) {
+      throw new Error(`Invalid event module origin: ${eventType}`);
     }
 
-    const data = event.parsedJson as EscrowEvent;
+    const data = event.contents.json as EscrowEvent;
     const id = (data as EscrowCreated).escrow_id;
 
     // Initialize entry for this escrow if we haven't seen it yet
@@ -290,12 +288,12 @@ export const handleEscrowObjects = async (
 
     // --- Narrow on the specific event type and apply fields ---
 
-    if (event.type.endsWith('::EscrowCancelled')) {
+    if (eventType.endsWith('::EscrowCancelled')) {
       updates[id].cancelled = true;
       continue;
     }
 
-    if (event.type.endsWith('::EscrowSwapped')) {
+    if (eventType.endsWith('::EscrowSwapped')) {
       updates[id].swapped = true;
       continue;
     }
@@ -331,9 +329,12 @@ Same pattern, but for the `lock` module events.
 ```ts
 import { LockedModel } from '../models/locked';
 
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
+type GraphQLEvent = {
+  contents: {
+    type: { repr: string };
+    json: unknown;
+  };
+  sender: { address: string };
 };
 
 type LockCreated = {
@@ -350,24 +351,26 @@ type LockDestroyed = {
 type LockedEvent = LockCreated | LockDestroyed;
 
 export const handleLockObjects = async (
-  events: SuiEvent[],
-  type: string,
+  events: GraphQLEvent[],
+  moduleType: string,
 ): Promise<void> => {
   const updates: Record<string, Record<string, unknown>> = {};
 
   for (const event of events) {
-    if (!event.type.startsWith(type)) {
-      throw new Error(`Invalid event module origin: ${event.type}`);
+    const eventType = event.contents.type.repr;
+
+    if (!eventType.startsWith(moduleType)) {
+      throw new Error(`Invalid event module origin: ${eventType}`);
     }
 
-    const data = event.parsedJson as LockedEvent;
+    const data = event.contents.json as LockedEvent;
     const id = (data as LockCreated).lock_id;
 
     if (!Object.hasOwn(updates, id)) {
       updates[id] = { objectId: id };
     }
 
-    if (event.type.endsWith('::LockDestroyed')) {
+    if (eventType.endsWith('::LockDestroyed')) {
       updates[id].deleted = true;
       continue;
     }
@@ -395,92 +398,71 @@ export const handleLockObjects = async (
 
 ## Step 5 — The Event Indexer (Polling Loop)
 
-This is the heart of the indexer. It defines which contract modules to watch, polls Sui for new events, hands them to the right handler, and saves the cursor so it can resume.
+This is the heart of the indexer. It defines which contract modules to watch, polls Sui for new events using GraphQL, hands them to the right handler, and saves the cursor so it can resume.
 
 **How the cursor works:**
 
-Sui's `queryEvents` response looks like this:
+Sui's GraphQL `events` query response looks like this:
 
 ```ts
 {
-  events: SuiEvent[],
-  nextCursor: { txDigest: string, eventSeq: string } | undefined,
-  hasNextPage: boolean
+  pageInfo: {
+    hasNextPage: boolean;
+    endCursor: string | null;
+  },
+  nodes: GraphQLEvent[]
 }
 ```
 
-- `events` is the batch of events
+- `nodes` is the batch of events
 - `hasNextPage` tells you if there are more events to fetch *right now* (before waiting)
-- `nextCursor` is the position to continue from next time
+- `endCursor` is the position to continue from next time
 
-You save `nextCursor` to MongoDB after each successful page. On the next run (or restart), you load it and pass it back to `queryEvents` as the starting point.
+You save `endCursor` to MongoDB after each successful page. On the next run (or restart), you load it and pass it back as the `after` parameter.
 
 ---
 
 **`api/indexer/event-indexer.ts`**
 
 ```ts
-import { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
+import { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { CONFIG } from '../config';
 import { getClient } from '../sui-utils';
 import { CursorModel } from '../models/cursor';
 import { handleEscrowObjects } from './escrow-handler';
 import { handleLockObjects } from './locked-handler';
 
-// Event structure from queryEvents response
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
+// GraphQL event structure
+type GraphQLEvent = {
+  contents: {
+    type: { repr: string };
+    json: unknown;
+  };
+  sender: { address: string };
 };
 
-// Use the official EventFilter type from SuiClientTypes
-type SuiEventFilter = SuiClientTypes.EventFilter;
+type SuiEventsCursor = string | null | undefined;
 
-// Cursor type from Sui gRPC API
-type EventId = {
-  txDigest: string;
-  eventSeq: string;
-};
-
-type SuiEventsCursor = EventId | null | undefined;
-
-// Describes one "thing to watch" — a module filter + a handler callback
+// Describes one "thing to watch" — a module + a handler callback
 type EventTracker = {
   // Unique string ID for this tracker (used as the cursor key in MongoDB)
-  type: string;
-  // The filter passed to Sui's queryEvents API
-  filter: SuiEventFilter;
+  id: string;
+  // The event type prefix to filter by (e.g., '0xABC::lock')
+  typePrefix: string;
   // Called with each batch of events
-  callback: (events: SuiEvent[], type: string) => Promise<void>;
+  callback: (events: GraphQLEvent[], typePrefix: string) => Promise<void>;
 };
 
 // --- Define which events to track ---
-//
-// MoveEventModule matches ALL events emitted by a specific module.
-// This means if your module emits EscrowCreated, EscrowSwapped, and
-// EscrowCancelled, you get all three with one filter — the handler
-// then narrows by event.type.
-//
 const EVENTS_TO_TRACK: EventTracker[] = [
   {
-    type: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
-    filter: {
-      MoveEventModule: {
-        module: 'lock',
-        package: CONFIG.SWAP_CONTRACT.packageId,
-      },
-    },
+    id: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
+    typePrefix: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
     callback: handleLockObjects,
   },
   {
-    type: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
-    filter: {
-      MoveEventModule: {
-        module: 'shared',
-        package: CONFIG.SWAP_CONTRACT.packageId,
-      },
-    },
+    id: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
+    typePrefix: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
     callback: handleEscrowObjects,
   },
 ];
@@ -490,24 +472,17 @@ const EVENTS_TO_TRACK: EventTracker[] = [
 const getLatestCursor = async (
   tracker: EventTracker,
 ): Promise<SuiEventsCursor> => {
-  const doc = await CursorModel.findOne({ id: tracker.type }).lean();
-  if (!doc) {
-    // No cursor saved yet — start from the beginning of history
-    return undefined;
-  }
-  return {
-    eventSeq:  doc.eventSeq,
-    txDigest:  doc.txDigest,
-  };
+  const doc = await CursorModel.findOne({ id: tracker.id }).lean();
+  return doc?.cursor ?? undefined;
 };
 
 const saveLatestCursor = async (
   tracker: EventTracker,
-  cursor: EventId,
+  cursor: string,
 ): Promise<void> => {
   await CursorModel.updateOne(
-    { id: tracker.type },
-    { $set: { eventSeq: cursor.eventSeq, txDigest: cursor.txDigest } },
+    { id: tracker.id },
+    { $set: { cursor } },
     { upsert: true },
   );
 };
@@ -520,40 +495,66 @@ type EventExecutionResult = {
 };
 
 const executeEventJob = async (
-  client: SuiGrpcClient,
+  client: SuiGraphQLClient,
   tracker: EventTracker,
   cursor: SuiEventsCursor,
 ): Promise<EventExecutionResult> => {
   try {
-    // Fetch a page of events from the Sui gRPC endpoint
-    const result = await client.queryEvents({
-      query: tracker.filter,
-      cursor,
-      limit: 50, // Fetch up to 50 events per page (adjust as needed)
+    // Fetch a page of events from the Sui GraphQL endpoint
+    const result = await client.query({
+      query: `
+        query QueryEvents($typePrefix: String, $first: Int, $after: String) {
+          events(
+            first: $first
+            after: $after
+            filter: { eventType: $typePrefix }
+          ) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              sender { address }
+              contents {
+                type { repr }
+                json
+              }
+            }
+          }
+        }
+      `,
+      variables: {
+        typePrefix: tracker.typePrefix,
+        first: 50, // Fetch up to 50 events per page
+        after: cursor,
+      },
     });
 
-    const events = result.events || [];
-    const hasNextPage = result.hasNextPage ?? false;
-    const nextCursor = result.nextCursor;
+    const events = result.data?.events?.nodes ?? [];
+    const pageInfo = result.data?.events?.pageInfo;
+    const hasNextPage = pageInfo?.hasNextPage ?? false;
+    const nextCursor = pageInfo?.endCursor;
 
     // Pass the batch to the appropriate handler
-    await tracker.callback(events, tracker.type);
+    if (events.length > 0) {
+      await tracker.callback(events, tracker.typePrefix);
+    }
 
-    // Only advance the cursor if we actually got new events
+    // Only advance the cursor if we got a valid nextCursor
     if (nextCursor && events.length > 0) {
       await saveLatestCursor(tracker, nextCursor);
       return { cursor: nextCursor, hasNextPage };
     }
   } catch (e) {
     // Log the error but don't crash — the loop will retry on the next poll
-    console.error(`[${tracker.type}] Error processing events:`, e);
+    console.error(`[${tracker.id}] Error processing events:`, e);
   }
 
   return { cursor, hasNextPage: false };
 };
 
 const runEventJob = async (
-  client: SuiGrpcClient,
+  client: SuiGraphQLClient,
   tracker: EventTracker,
   cursor: SuiEventsCursor,
 ): Promise<void> => {
@@ -576,7 +577,7 @@ export const setupListeners = async (): Promise<void> => {
     // Resume from wherever we left off (or from the beginning if first run)
     const savedCursor = await getLatestCursor(tracker);
     console.log(
-      `[${tracker.type}] Starting from cursor:`,
+      `[${tracker.id}] Starting from cursor:`,
       savedCursor ?? 'beginning',
     );
     runEventJob(client, tracker, savedCursor);
@@ -651,7 +652,7 @@ Indexer running. Listening for events...
 
 After it runs for a bit, you can open a MongoDB client (e.g., [MongoDB Compass](https://www.mongodb.com/products/compass)) and inspect your collections:
 
-- `cursors` — one document per tracker, storing `eventSeq` + `txDigest`
+- `cursors` — one document per tracker, storing the `endCursor`
 - `escrows` — one document per escrow object
 - `lockeds` — one document per locked object
 
@@ -660,13 +661,13 @@ After it runs for a bit, you can open a MongoDB client (e.g., [MongoDB Compass](
 ## How It All Connects (Summary)
 
 ```
-Sui Network (gRPC endpoint)
+Sui Network (GraphQL endpoint)
        │
-       │  queryEvents (with cursor + MoveEventModule filter)
+       │  GraphQL query with eventType filter + cursor
        ▼
 event-indexer.ts  ◄─── cursor loaded from MongoDB on startup
        │
-       │  batch of SuiEvent[]
+       │  batch of GraphQLEvent[]
        ├──────────────────────────────────┐
        ▼                                  ▼
 escrow-handler.ts               locked-handler.ts
@@ -675,67 +676,19 @@ escrow-handler.ts               locked-handler.ts
        ▼                                  ▼
            MongoDB (escrows + lockeds collections)
 
-event-indexer.ts also saves nextCursor ──► MongoDB (cursors collection)
+event-indexer.ts also saves endCursor ──► MongoDB (cursors collection)
 ```
 
 ---
 
-## Key Differences from JSON-RPC (v1.x)
+## Advantages of GraphQL Over gRPC
 
-If you're migrating from the older `SuiClient` (JSON-RPC), here are the main changes:
-
-| Old (JSON-RPC) | New (gRPC) |
-|---|---|
-| `import { SuiClient } from '@mysten/sui/client'` | `import { SuiGrpcClient } from '@mysten/sui/grpc'` |
-| `import { SuiEvent } from '@mysten/sui/client'` | Define your own:<br/>`type SuiEvent = { type: string; parsedJson: unknown }` |
-| `new SuiClient({ url: getFullnodeUrl('testnet') })` | `new SuiGrpcClient({ network: 'testnet', baseUrl: '...' })` |
-| `client.queryEvents({ query, cursor, order })` | `client.queryEvents({ query, cursor, limit })` |
-| Response: `{ data, hasNextPage, nextCursor }` | Response: `{ events, hasNextPage, nextCursor }` |
-
-The gRPC client offers:
-- **Better performance** — gRPC is more efficient than JSON-RPC
-- **Type safety** — Use `SuiClientTypes.EventFilter` for filters
-- **Future-proof** — the JSON-RPC API is deprecated and will eventually be removed
-
-**Note on types:** The v2.0 SDK is transitioning to gRPC, and the TypeScript type definitions are still stabilizing. The runtime response structure (with `type` and `parsedJson` fields) is stable, but the exported types don't yet fully reflect this. Defining your own minimal interfaces is the current recommended approach.
-
----
-
-## Troubleshooting
-
-### Type Errors with Event Types
-
-The `SuiClientTypes.Event` type in v2.0 doesn't directly expose the `type` and `parsedJson` fields that are present in the actual runtime response. To work around this, we define our own minimal interface:
-
-```ts
-// Define this type in your handler files
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
-};
-```
-
-This matches the actual structure returned by `queryEvents`. For filters, you can use the official type:
-
-```ts
-import type { SuiClientTypes } from '@mysten/sui/client';
-
-type SuiEventFilter = SuiClientTypes.EventFilter;
-```
-
-**Why the mismatch?** The gRPC client's TypeScript types are still evolving. The runtime response includes fields like `type`, `parsedJson`, `id`, `packageId`, `sender`, etc., but these aren't fully reflected in the exported TypeScript types yet. Defining your own minimal interface is the current best practice.
-
-**Alternative: Extract type from response**
-
-If you want to derive the type from the actual client response:
-
-```ts
-import { SuiGrpcClient } from '@mysten/sui/grpc';
-
-// Extract the event type from what queryEvents actually returns
-type QueryEventsResponse = Awaited<ReturnType<SuiGrpcClient['queryEvents']>>;
-type SuiEvent = QueryEventsResponse['events'][number];
-```
+✅ **Cleaner query syntax** - Write readable GraphQL queries instead of filter objects  
+✅ **Flexible field selection** - Request only the fields you need  
+✅ **Better error handling** - GraphQL responses include detailed error messages  
+✅ **Type-safe responses** - The response structure matches your query exactly  
+✅ **Simpler cursor management** - Single string cursor instead of compound object  
+✅ **No type definition issues** - Work directly with the response structure  
 
 ---
 
@@ -752,13 +705,25 @@ db.cursors.deleteMany({})
 
 **Scaling up** — Each tracker runs its own independent `setTimeout` loop. If you have many modules to track, they all run concurrently without blocking each other.
 
-**Filtering event queries** — The `MoveEventModule` filter used here matches all events from a module. Sui also supports:
-- `MoveEventType` — match a single specific event type
-- `Sender` — filter by transaction sender
-- `Transaction` — filter by transaction digest
-- `TimeRange` — filter by timestamp
+**GraphQL query customization** — You can modify the GraphQL query to fetch additional fields:
 
-**Pagination** — The `limit` parameter in `queryEvents` controls how many events to fetch per page (default is 50). Increase this if you want larger batches, but be mindful of RPC rate limits.
+```graphql
+nodes {
+  sender { address }
+  timestamp
+  transactionModule {
+    package { address }
+    name
+  }
+  contents {
+    type { repr }
+    json
+    bcs
+  }
+}
+```
+
+**Pagination** — The `first` parameter controls how many events to fetch per page (default is 50). Increase this if you want larger batches, but be mindful of response size.
 
 ---
 
@@ -767,7 +732,7 @@ db.cursors.deleteMany({})
 - **Add more modules**: Expand `EVENTS_TO_TRACK` to index other contract modules
 - **Add a REST API**: Build Express endpoints that query your MongoDB collections
 - **Error monitoring**: Forward exceptions to a service like Sentry or Datadog
-- **Rate limiting**: Add exponential backoff if you hit RPC limits
+- **Rate limiting**: Add exponential backoff if you hit API limits
 - **Multi-network support**: Run separate indexers for mainnet and testnet
 
-You now have a production-ready event indexer using the latest Sui TypeScript SDK!
+You now have a production-ready event indexer using GraphQL!
