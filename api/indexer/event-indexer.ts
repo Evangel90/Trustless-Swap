@@ -1,64 +1,41 @@
-import { SuiGrpcClient } from '@mysten/sui/grpc';
-import type { SuiClientTypes } from '@mysten/sui/client';
+import { SuiGraphQLClient } from '@mysten/sui/graphql';
 import { CONFIG } from '../config';
 import { getClient } from '../sui-utils';
 import { CursorModel } from '../models/cursor';
 import { handleEscrowObjects } from './escrow-handler';
 import { handleLockObjects } from './locked-handler';
 
-// Event structure from queryEvents response
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
+// GraphQL event structure
+type GraphQLEvent = {
+  contents: {
+    type: { repr: string };
+    json: unknown;
+  };
+  sender: { address: string };
 };
 
-// Use the official EventFilter type from SuiClientTypes
-type SuiEventFilter = SuiClientTypes.EventFilter;
+type SuiEventsCursor = string | null | undefined;
 
-// Cursor type from Sui gRPC API
-type EventId = {
-  txDigest: string;
-  eventSeq: string;
-};
-
-type SuiEventsCursor = EventId | null | undefined;
-
-// Describes one "thing to watch" — a module filter + a handler callback
+// Describes one "thing to watch" — a module + a handler callback
 type EventTracker = {
   // Unique string ID for this tracker (used as the cursor key in MongoDB)
-  type: string;
-  // The filter passed to Sui's queryEvents API
-  filter: SuiEventFilter;
+  id: string;
+  // The event type prefix to filter by (e.g., '0xABC::lock')
+  typePrefix: string;
   // Called with each batch of events
-  callback: (events: SuiEvent[], type: string) => Promise<void>;
+  callback: (events: GraphQLEvent[], typePrefix: string) => Promise<void>;
 };
 
 // --- Define which events to track ---
-//
-// MoveEventModule matches ALL events emitted by a specific module.
-// This means if your module emits EscrowCreated, EscrowSwapped, and
-// EscrowCancelled, you get all three with one filter — the handler
-// then narrows by event.type.
-//
 const EVENTS_TO_TRACK: EventTracker[] = [
   {
-    type: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
-    filter: {
-      MoveEventModule: {
-        module: 'lock',
-        package: CONFIG.SWAP_CONTRACT.packageId,
-      },
-    },
+    id: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
+    typePrefix: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
     callback: handleLockObjects,
   },
   {
-    type: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
-    filter: {
-      MoveEventModule: {
-        module: 'shared',
-        package: CONFIG.SWAP_CONTRACT.packageId,
-      },
-    },
+    id: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
+    typePrefix: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
     callback: handleEscrowObjects,
   },
 ];
@@ -68,24 +45,17 @@ const EVENTS_TO_TRACK: EventTracker[] = [
 const getLatestCursor = async (
   tracker: EventTracker,
 ): Promise<SuiEventsCursor> => {
-  const doc = await CursorModel.findOne({ id: tracker.type }).lean();
-  if (!doc) {
-    // No cursor saved yet — start from the beginning of history
-    return undefined;
-  }
-  return {
-    eventSeq:  doc.eventSeq,
-    txDigest:  doc.txDigest,
-  };
+  const doc = await CursorModel.findOne({ id: tracker.id }).lean() as any;
+  return doc?.cursor ?? undefined;
 };
 
 const saveLatestCursor = async (
   tracker: EventTracker,
-  cursor: EventId,
+  cursor: string,
 ): Promise<void> => {
   await CursorModel.updateOne(
-    { id: tracker.type },
-    { $set: { eventSeq: cursor.eventSeq, txDigest: cursor.txDigest } },
+    { id: tracker.id },
+    { $set: { cursor } },
     { upsert: true },
   );
 };
@@ -98,40 +68,66 @@ type EventExecutionResult = {
 };
 
 const executeEventJob = async (
-  client: SuiGrpcClient,
+  client: SuiGraphQLClient,
   tracker: EventTracker,
   cursor: SuiEventsCursor,
 ): Promise<EventExecutionResult> => {
   try {
-    // Fetch a page of events from the Sui gRPC endpoint
-    const result = await client.queryEvents({
-      query: tracker.filter,
-      cursor,
-      limit: 50, // Fetch up to 50 events per page (adjust as needed)
+    // Fetch a page of events from the Sui GraphQL endpoint
+    const result = await client.query({
+      query: `
+        query QueryEvents($typePrefix: String, $first: Int, $after: String) {
+          events(
+            first: $first
+            after: $after
+            filter: { eventType: $typePrefix }
+          ) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              sender { address }
+              contents {
+                type { repr }
+                json
+              }
+            }
+          }
+        }
+      `,
+      variables: {
+        typePrefix: tracker.typePrefix,
+        first: 50, // Fetch up to 50 events per page
+        after: cursor,
+      },
     });
 
-    const events = result.events || [];
-    const hasNextPage = result.hasNextPage ?? false;
-    const nextCursor = result.nextCursor;
+    const events = (result.data as any)?.events?.nodes ?? [];
+    const pageInfo = (result.data as any)?.events?.pageInfo;
+    const hasNextPage = pageInfo?.hasNextPage ?? false;
+    const nextCursor = pageInfo?.endCursor;
 
     // Pass the batch to the appropriate handler
-    await tracker.callback(events, tracker.type);
+    if (events.length > 0) {
+      await tracker.callback(events, tracker.typePrefix);
+    }
 
-    // Only advance the cursor if we actually got new events
+    // Only advance the cursor if we got a valid nextCursor
     if (nextCursor && events.length > 0) {
       await saveLatestCursor(tracker, nextCursor);
       return { cursor: nextCursor, hasNextPage };
     }
   } catch (e) {
     // Log the error but don't crash — the loop will retry on the next poll
-    console.error(`[${tracker.type}] Error processing events:`, e);
+    console.error(`[${tracker.id}] Error processing events:`, e);
   }
 
   return { cursor, hasNextPage: false };
 };
 
 const runEventJob = async (
-  client: SuiGrpcClient,
+  client: SuiGraphQLClient,
   tracker: EventTracker,
   cursor: SuiEventsCursor,
 ): Promise<void> => {
@@ -154,7 +150,7 @@ export const setupListeners = async (): Promise<void> => {
     // Resume from wherever we left off (or from the beginning if first run)
     const savedCursor = await getLatestCursor(tracker);
     console.log(
-      `[${tracker.type}] Starting from cursor:`,
+      `[${tracker.id}] Starting from cursor:`,
       savedCursor ?? 'beginning',
     );
     runEventJob(client, tracker, savedCursor);

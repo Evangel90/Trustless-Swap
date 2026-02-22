@@ -1,12 +1,12 @@
-import type { SuiClientTypes } from '@mysten/sui/client';
 import { EscrowModel } from '../models/escrow';
 
-// The actual event structure from queryEvents includes these fields
-// We extend the base Event type to include the fields we need
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
-  // Other fields available: id, packageId, sender, bcs, timestampMs
+// GraphQL event structure
+type GraphQLEvent = {
+  contents: {
+    type: { repr: string };
+    json: unknown;
+  };
+  sender: { address: string };
 };
 
 // --- Type definitions matching the Move event structs ---
@@ -27,12 +27,12 @@ type EscrowCancelled = {
   escrow_id: string;
 };
 
-// Union type — we'll narrow it based on event.type below
+// Union type — we'll narrow it based on event type below
 type EscrowEvent = EscrowCreated | EscrowSwapped | EscrowCancelled;
 
 export const handleEscrowObjects = async (
-  events: SuiEvent[],
-  type: string,
+  events: GraphQLEvent[],
+  moduleType: string, // e.g., '0xABC::shared'
 ): Promise<void> => {
   // We accumulate all changes for a given escrow_id here
   // before writing, so multiple events for the same object
@@ -40,13 +40,15 @@ export const handleEscrowObjects = async (
   const updates: Record<string, Record<string, unknown>> = {};
 
   for (const event of events) {
+    const eventType = event.contents.type.repr;
+
     // Safety check: make sure this event actually came from the
-    // module we're tracking, not some other module that slipped in.
-    if (!event.type.startsWith(type)) {
-      throw new Error(`Invalid event module origin: ${event.type}`);
+    // module we're tracking
+    if (!eventType.startsWith(moduleType)) {
+      throw new Error(`Invalid event module origin: ${eventType}`);
     }
 
-    const data = event.parsedJson as EscrowEvent;
+    const data = event.contents.json as EscrowEvent;
     const id = (data as EscrowCreated).escrow_id;
 
     // Initialize entry for this escrow if we haven't seen it yet
@@ -56,12 +58,12 @@ export const handleEscrowObjects = async (
 
     // --- Narrow on the specific event type and apply fields ---
 
-    if (event.type.endsWith('::EscrowCancelled')) {
+    if (eventType.endsWith('::EscrowCancelled')) {
       updates[id].cancelled = true;
       continue;
     }
 
-    if (event.type.endsWith('::EscrowSwapped')) {
+    if (eventType.endsWith('::EscrowSwapped')) {
       updates[id].swapped = true;
       continue;
     }

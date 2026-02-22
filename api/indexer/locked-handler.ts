@@ -1,8 +1,11 @@
 import { LockedModel } from '../models/locked';
 
-type SuiEvent = {
-  type: string;
-  parsedJson: unknown;
+type GraphQLEvent = {
+  contents: {
+    type: { repr: string };
+    json: unknown;
+  };
+  sender: { address: string };
 };
 
 type LockCreated = {
@@ -19,24 +22,26 @@ type LockDestroyed = {
 type LockedEvent = LockCreated | LockDestroyed;
 
 export const handleLockObjects = async (
-  events: SuiEvent[],
-  type: string,
+  events: GraphQLEvent[],
+  moduleType: string,
 ): Promise<void> => {
   const updates: Record<string, Record<string, unknown>> = {};
 
   for (const event of events) {
-    if (!event.type.startsWith(type)) {
-      throw new Error(`Invalid event module origin: ${event.type}`);
+    const eventType = event.contents.type.repr;
+
+    if (!eventType.startsWith(moduleType)) {
+      throw new Error(`Invalid event module origin: ${eventType}`);
     }
 
-    const data = event.parsedJson as LockedEvent;
+    const data = event.contents.json as LockedEvent;
     const id = (data as LockCreated).lock_id;
 
     if (!Object.hasOwn(updates, id)) {
       updates[id] = { objectId: id };
     }
 
-    if (event.type.endsWith('::LockDestroyed')) {
+    if (eventType.endsWith('::LockDestroyed')) {
       updates[id].deleted = true;
       continue;
     }
