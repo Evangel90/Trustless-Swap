@@ -31,6 +31,11 @@ public struct EscrowCancelled has copy, drop{
     escrow_id: ID,
 }
 
+//test event to check if indexer is working
+public struct SharedIndexerWorking has copy, drop{
+    tx_sender: address,
+}
+
 const EMismatchedSenderRecipient: u64 = 0;
 
 const EMismatchedExchangeObject: u64 = 1;
@@ -111,5 +116,12 @@ public fun return_to_sender<T: key + store>(mut escrow: Escrow<T>, ctx: &TxConte
     assert!(sender == ctx.sender(), EMismatchedSenderRecipient);
     id.delete();
     escrowed
+}
+
+//test indexer
+public fun emit_test_event(ctx: &TxContext){
+    event::emit(SharedIndexerWorking{
+        tx_sender: ctx.sender(),
+    }); 
 }
 
