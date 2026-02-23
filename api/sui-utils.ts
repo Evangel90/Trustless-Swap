@@ -1,16 +1,10 @@
-import { SuiGraphQLClient } from '@mysten/sui/graphql';
+import { getFullnodeUrl, SuiClient } from '@mysten/sui.js/client'
 
 type Network = 'mainnet' | 'testnet';
 
-// Network-to-URL mapping for GraphQL endpoints
-const GRAPHQL_URLS: Record<Network, string> = {
-  mainnet: 'https://sui-mainnet.mystenlabs.com/graphql',
-  testnet: 'https://graphql.testnet.sui.io/graphql',
-};
-
-export const getClient = (network: Network): SuiGraphQLClient => {
-  return new SuiGraphQLClient({
-    url: GRAPHQL_URLS[network],
-    network,
+export const getClient = (network: Network): SuiClient => {
+  return new SuiClient({
+    url: getFullnodeUrl(network),
   });
-};
+
+}

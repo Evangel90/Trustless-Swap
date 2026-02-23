@@ -1,90 +1,50 @@
+import { SuiEvent } from '@mysten/sui.js/client';
 import { EscrowModel } from '../models/escrow';
 
-// GraphQL event structure
-type GraphQLEvent = {
-  contents: {
-    type: { repr: string };
-    json: unknown;
-  };
-  sender: { address: string };
-};
-
-// --- Type definitions matching the Move event structs ---
-
 type EscrowCreated = {
-  sender:     string;
-  recipient:  string;
-  escrow_id:  string;
-  key_id:     string;
-  item_id:    string;
-};
-
-type EscrowSwapped = {
+  sender: string;
+  recipient: string;
   escrow_id: string;
+  key_id: string;
+  item_id: string;
 };
+type EscrowSwapped   = { escrow_id: string };
+type EscrowCancelled = { escrow_id: string };
+type EscrowEvent     = EscrowCreated | EscrowSwapped | EscrowCancelled;
 
-type EscrowCancelled = {
-  escrow_id: string;
-};
-
-// Union type — we'll narrow it based on event type below
-type EscrowEvent = EscrowCreated | EscrowSwapped | EscrowCancelled;
-
-export const handleEscrowObjects = async (
-  events: GraphQLEvent[],
-  moduleType: string, // e.g., '0xABC::shared'
-): Promise<void> => {
-  // We accumulate all changes for a given escrow_id here
-  // before writing, so multiple events for the same object
-  // are collapsed into one DB operation.
-  const updates: Record<string, Record<string, unknown>> = {};
+export const handleEscrowObjects = async (events: SuiEvent[], type: string) => {
+  const updates: Record<string, any> = {};
 
   for (const event of events) {
-    const eventType = event.contents.type.repr;
+    if (!event.type.startsWith(type)) throw new Error('Invalid event module origin');
 
-    // Safety check: make sure this event actually came from the
-    // module we're tracking
-    if (!eventType.startsWith(moduleType)) {
-      throw new Error(`Invalid event module origin: ${eventType}`);
-    }
+    const data = event.parsedJson as EscrowEvent;
+    const id   = (data as any).escrow_id;
 
-    const data = event.contents.json as EscrowEvent;
-    const id = (data as EscrowCreated).escrow_id;
-
-    // Initialize entry for this escrow if we haven't seen it yet
     if (!Object.hasOwn(updates, id)) {
-      updates[id] = { objectId: id };
+      updates[id] = { escrowId: id };
     }
 
-    // --- Narrow on the specific event type and apply fields ---
-
-    if (eventType.endsWith('::EscrowCancelled')) {
+    if (event.type.endsWith('::EscrowCancelled')) {
       updates[id].cancelled = true;
       continue;
     }
-
-    if (eventType.endsWith('::EscrowSwapped')) {
+    if (event.type.endsWith('::EscrowSwapped')) {
       updates[id].swapped = true;
       continue;
     }
 
-    // If it's not Cancelled or Swapped, it must be EscrowCreated
-    const created = data as EscrowCreated;
-    updates[id].sender    = created.sender;
-    updates[id].recipient = created.recipient;
-    updates[id].keyId     = created.key_id;
-    updates[id].itemId    = created.item_id;
+    // EscrowCreated
+    const d = data as EscrowCreated;
+    updates[id].sender    = d.sender;
+    updates[id].recipient = d.recipient;
+    updates[id].keyId     = d.key_id;
+    updates[id].itemId    = d.item_id;
   }
 
-  // Bulk upsert: for each objectId, create the document if it
-  // doesn't exist, or merge in the new fields if it does.
   await Promise.all(
-    Object.values(updates).map((update) =>
-      EscrowModel.updateOne(
-        { objectId: update.objectId },   // filter: find by objectId
-        { $set: update },                // update: apply all fields
-        { upsert: true },                // create if not found
-      ),
+    Object.values(updates).map((u) =>
+      EscrowModel.updateOne({ escrowId: u.escrowId }, { $set: u }, { upsert: true }),
     ),
   );
 };

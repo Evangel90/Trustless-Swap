@@ -1,65 +1,43 @@
+import { SuiEvent } from '@mysten/sui.js/client';
 import { LockedModel } from '../models/locked';
 
-type GraphQLEvent = {
-  contents: {
-    type: { repr: string };
-    json: unknown;
-  };
-  sender: { address: string };
+type LockedCreated = {
+  locked_id: string;
+  key_id:    string;
+  creator:   string;
+  item_id:   string;
 };
+type LockedDestroyed = { locked_id: string };
+type LockedEvent     = LockedCreated | LockedDestroyed;
 
-type LockCreated = {
-  lock_id:  string;
-  key_id:   string;
-  creator:  string;
-  item_id:  string;
-};
-
-type LockDestroyed = {
-  lock_id: string;
-};
-
-type LockedEvent = LockCreated | LockDestroyed;
-
-export const handleLockObjects = async (
-  events: GraphQLEvent[],
-  moduleType: string,
-): Promise<void> => {
-  const updates: Record<string, Record<string, unknown>> = {};
+export const handleLockObjects = async (events: SuiEvent[], type: string) => {
+  const updates: Record<string, any> = {};
 
   for (const event of events) {
-    const eventType = event.contents.type.repr;
+    if (!event.type.startsWith(type)) throw new Error('Invalid event module origin');
 
-    if (!eventType.startsWith(moduleType)) {
-      throw new Error(`Invalid event module origin: ${eventType}`);
-    }
-
-    const data = event.contents.json as LockedEvent;
-    const id = (data as LockCreated).lock_id;
+    const data = event.parsedJson as LockedEvent;
+    const id   = (data as any).locked_id;
 
     if (!Object.hasOwn(updates, id)) {
-      updates[id] = { objectId: id };
+      updates[id] = { lockId: id };
     }
 
-    if (eventType.endsWith('::LockDestroyed')) {
+    if (event.type.endsWith('::LockedDestroyed')) {
       updates[id].deleted = true;
       continue;
     }
 
-    // LockCreated
-    const created = data as LockCreated;
-    updates[id].keyId   = created.key_id;
-    updates[id].creator = created.creator;
-    updates[id].itemId  = created.item_id;
+    // LockedCreated
+    const d = data as LockedCreated;
+    updates[id].keyId   = d.key_id;
+    updates[id].creator = d.creator;
+    updates[id].itemId  = d.item_id;
   }
 
   await Promise.all(
-    Object.values(updates).map((update) =>
-      LockedModel.updateOne(
-        { objectId: update.objectId },
-        { $set: update },
-        { upsert: true },
-      ),
+    Object.values(updates).map((u) =>
+      LockedModel.updateOne({ lockId: u.lockId }, { $set: u }, { upsert: true }),
     ),
   );
 };

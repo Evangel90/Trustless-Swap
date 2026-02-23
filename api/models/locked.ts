@@ -6,7 +6,7 @@ const LockedSchema = new Schema(
     keyId:    { type: String },
     creator:  { type: String, index: true },
     itemId:   { type: String },
-    // deleted:  { type: Boolean, default: false, index: true },
+    deleted:  { type: Boolean, default: false, index: true },
   },
   {
     timestamps: true,

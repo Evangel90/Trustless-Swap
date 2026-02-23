@@ -1,158 +1,100 @@
-import { SuiGraphQLClient } from '@mysten/sui/graphql';
+import { EventId, SuiClient, SuiEvent, SuiEventFilter } from '@mysten/sui.js/client';
 import { CONFIG } from '../config';
 import { getClient } from '../sui-utils';
 import { CursorModel } from '../models/cursor';
 import { handleEscrowObjects } from './escrow-handler';
 import { handleLockObjects } from './locked-handler';
 
-// GraphQL event structure
-type GraphQLEvent = {
-  contents: {
-    type: { repr: string };
-    json: unknown;
-  };
-  sender: { address: string };
-};
+type SuiEventsCursor = EventId | null | undefined;
 
-type SuiEventsCursor = string | null | undefined;
-
-// Describes one "thing to watch" — a module + a handler callback
 type EventTracker = {
-  // Unique string ID for this tracker (used as the cursor key in MongoDB)
-  id: string;
-  // The event type prefix to filter by (e.g., '0xABC::lock')
-  typePrefix: string;
-  // Called with each batch of events
-  callback: (events: GraphQLEvent[], typePrefix: string) => Promise<void>;
+  type: string;
+  filter: SuiEventFilter;
+  callback: (events: SuiEvent[], type: string) => Promise<void>;
 };
 
-// --- Define which events to track ---
 const EVENTS_TO_TRACK: EventTracker[] = [
   {
-    id: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
-    typePrefix: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
+    type: `${CONFIG.SWAP_CONTRACT.packageId}::lock`,
+    filter: {
+      MoveEventModule: {
+        module: 'lock',
+        package: CONFIG.SWAP_CONTRACT.packageId!,
+      },
+    },
     callback: handleLockObjects,
   },
   {
-    id: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
-    typePrefix: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
+    type: `${CONFIG.SWAP_CONTRACT.packageId}::shared`,
+    filter: {
+      MoveEventModule: {
+        module: 'shared',
+        package: CONFIG.SWAP_CONTRACT.packageId!,
+      },
+    },
     callback: handleEscrowObjects,
   },
 ];
 
-// --- Cursor helpers ---
+// ── Cursor helpers (Mongoose instead of Prisma) ──────────────────────────────
 
-const getLatestCursor = async (
-  tracker: EventTracker,
-): Promise<SuiEventsCursor> => {
-  const doc = await CursorModel.findOne({ id: tracker.id }).lean() as any;
-  return doc?.cursor ?? undefined;
+const getLatestCursor = async (tracker: EventTracker) => {
+  const cursor = await CursorModel.findOne({ id: tracker.type }).lean();
+  return cursor
+    ? { eventSeq: cursor.eventSeq, txDigest: cursor.txDigest }
+    : undefined;
 };
 
-const saveLatestCursor = async (
-  tracker: EventTracker,
-  cursor: string,
-): Promise<void> => {
+const saveLatestCursor = async (tracker: EventTracker, cursor: EventId) => {
   await CursorModel.updateOne(
-    { id: tracker.id },
-    { $set: { cursor } },
+    { id: tracker.type },
+    { $set: { eventSeq: cursor.eventSeq, txDigest: cursor.txDigest } },
     { upsert: true },
   );
 };
 
-// --- Core polling logic ---
-
-type EventExecutionResult = {
-  cursor: SuiEventsCursor;
-  hasNextPage: boolean;
-};
+// ── Polling loop (unchanged from Prisma version) ─────────────────────────────
 
 const executeEventJob = async (
-  client: SuiGraphQLClient,
+  client: SuiClient,
   tracker: EventTracker,
   cursor: SuiEventsCursor,
-): Promise<EventExecutionResult> => {
+) => {
   try {
-    // Fetch a page of events from the Sui GraphQL endpoint
-    const result = await client.query({
-      query: `
-        query QueryEvents($typePrefix: String, $first: Int, $after: String) {
-          events(
-            first: $first
-            after: $after
-            filter: { eventType: $typePrefix }
-          ) {
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-            nodes {
-              sender { address }
-              contents {
-                type { repr }
-                json
-              }
-            }
-          }
-        }
-      `,
-      variables: {
-        typePrefix: tracker.typePrefix,
-        first: 50, // Fetch up to 50 events per page
-        after: cursor,
-      },
+    const { data, hasNextPage, nextCursor } = await client.queryEvents({
+      query: tracker.filter,
+      cursor,
+      order: 'ascending',
     });
 
-    const events = (result.data as any)?.events?.nodes ?? [];
-    const pageInfo = (result.data as any)?.events?.pageInfo;
-    const hasNextPage = pageInfo?.hasNextPage ?? false;
-    const nextCursor = pageInfo?.endCursor;
+    await tracker.callback(data, tracker.type);
 
-    // Pass the batch to the appropriate handler
-    if (events.length > 0) {
-      await tracker.callback(events, tracker.typePrefix);
-    }
-
-    // Only advance the cursor if we got a valid nextCursor
-    if (nextCursor && events.length > 0) {
+    if (nextCursor && data.length > 0) {
       await saveLatestCursor(tracker, nextCursor);
       return { cursor: nextCursor, hasNextPage };
     }
   } catch (e) {
-    // Log the error but don't crash — the loop will retry on the next poll
-    console.error(`[${tracker.id}] Error processing events:`, e);
+    console.error(e);
   }
-
   return { cursor, hasNextPage: false };
 };
 
 const runEventJob = async (
-  client: SuiGraphQLClient,
+  client: SuiClient,
   tracker: EventTracker,
   cursor: SuiEventsCursor,
-): Promise<void> => {
+) => {
   const result = await executeEventJob(client, tracker, cursor);
-
-  // If there are more pages available right now, fetch the next one immediately.
-  // Otherwise, wait for POLLING_INTERVAL_MS before checking again.
   setTimeout(
     () => runEventJob(client, tracker, result.cursor),
     result.hasNextPage ? 0 : CONFIG.POLLING_INTERVAL_MS,
   );
 };
 
-// --- Public: call this once to start all trackers ---
-
-export const setupListeners = async (): Promise<void> => {
+export const setupListeners = async () => {
   const client = getClient(CONFIG.NETWORK);
-
   for (const tracker of EVENTS_TO_TRACK) {
-    // Resume from wherever we left off (or from the beginning if first run)
-    const savedCursor = await getLatestCursor(tracker);
-    console.log(
-      `[${tracker.id}] Starting from cursor:`,
-      savedCursor ?? 'beginning',
-    );
-    runEventJob(client, tracker, savedCursor);
+    const latest = await getLatestCursor(tracker);
+    runEventJob(client, tracker, latest);
   }
 };

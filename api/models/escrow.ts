@@ -7,8 +7,8 @@ const EscrowSchema = new Schema(
     recipient: { type: String, index: true },
     keyId:     { type: String },
     itemId:    { type: String },
-    // swapped:   { type: Boolean, default: false },
-    // cancelled: { type: Boolean, default: false },
+    swapped:   { type: Boolean, default: false },
+    cancelled: { type: Boolean, default: false },
   },
   {
     // Automatically manages 'createdAt' and 'updatedAt' fields
