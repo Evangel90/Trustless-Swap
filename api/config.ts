@@ -1,15 +1,25 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import { readFileSync } from 'fs';
 
+import { Network } from './sui-utils';
+
+/// We assume our config files are in the format: { "packageId": "0x..." }
+const parseConfigurationFile = (fileName: string) => {
+	try {
+		return JSON.parse(readFileSync(`${fileName}.json`, 'utf8'));
+	} catch (e) {
+		throw new Error(`Missing config file ${fileName}.json`);
+	}
+};
+
+/**
+ * A default configuration
+ * You need to call `publish-contracts.ts` before running any functionality
+ * depends on it, or update our imports to not use these json files.
+ * */
 export const CONFIG = {
-  // Replace with your deployed package ID
-  SWAP_CONTRACT: {
-    packageId: process.env.PACKAGE_ID,
-  },
-
-  // Which network to connect to: 'mainnet' | 'testnet' | 'devnet' | 'localnet'
-  NETWORK: 'testnet' as const,
-
-  // How long to wait between polls when there are no new events (ms)
-  POLLING_INTERVAL_MS: 3000,
+	/// Look for events every 1s
+	POLLING_INTERVAL_MS: 1000,
+	DEFAULT_LIMIT: 50,
+	NETWORK: (process.env.NETWORK as Network) || 'testnet',
+	SWAP_CONTRACT: parseConfigurationFile('escrow-contract'),
 };
