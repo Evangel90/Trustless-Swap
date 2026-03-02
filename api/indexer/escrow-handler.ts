@@ -1,7 +1,7 @@
-import { SuiEvent } from '@mysten/sui.js/client';
+import { SuiEvent } from '@mysten/sui/jsonRpc';
 import { Prisma } from '@prisma/client';
 
-import { prisma } from '../db';
+import prisma from '../db';
 
 type EscrowEvent = EscrowCreated | EscrowCancelled | EscrowSwapped;
 
@@ -29,7 +29,8 @@ type EscrowCancelled = {
  * as part of the same batch of events (but using a single write/record to the DB).
  * */
 export const handleEscrowObjects = async (events: SuiEvent[], type: string) => {
-	const updates: Record<string, Prisma.EscrowCreateInput> = {};
+	const updates: Record<string, any> = {};
+	// const updates: Record<string, Prisma.EscrowCreateInput> = {};
 
 	for (const event of events) {
 		if (!event.type.startsWith(type)) throw new Error('Invalid event module origin');
