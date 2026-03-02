@@ -128,6 +128,7 @@ const saveLatestCursor = async (tracker: EventTracker, cursor: EventId) => {
 /// Sets up all the listeners for the events we want to track.
 /// They are polling the RPC endpoint every second.
 export const setupListeners = async () => {
+    console.log('Setting up event listeners...');
 	for (const event of EVENTS_TO_TRACK) {
 		runEventJob(getClient(CONFIG.NETWORK), event, await getLatestCursor(event));
 	}

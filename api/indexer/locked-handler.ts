@@ -57,7 +57,7 @@ export const handleLockObjects = async (events: SuiEvent[], type: string) => {
 	const promises = Object.values(updates).map((update) =>
 		prisma.locked.upsert({
 			where: {
-				objectId: update.objectId,
+				lockId: update.lockId,
 			},
 			create: {
 				...update,

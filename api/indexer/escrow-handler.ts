@@ -72,7 +72,7 @@ export const handleEscrowObjects = async (events: SuiEvent[], type: string) => {
 	const promises = Object.values(updates).map((update) =>
 		prisma.escrow.upsert({
 			where: {
-				objectId: update.objectId,
+				escrowId: update.escrowId,
 			},
 			create: update,
 			update,
